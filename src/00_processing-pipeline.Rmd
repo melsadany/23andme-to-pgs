@@ -1,0 +1,233 @@
+---
+title: "prepping 23andMe"
+output: html_notebook
+root.dir: "/Dedicated/jmichaelson-wdata/msmuhammad/scratch/PGS/src"
+---
+
+```{r setup, message=FALSE, warning=T}
+rm(list = ls()); gc()
+source("/Dedicated/jmichaelson-wdata/msmuhammad/msmuhammad-source.R")
+library(bigsnpr)
+project.dir <- "/Dedicated/jmichaelson-wdata/msmuhammad/scratch/PGS"
+# setwd(project.dir)
+```
+
+Step1:
+reformat 23andme
+```{r reformat 23andme}
+# getwd()
+# reformatting raw 23andme data
+raw <- read.delim("../data/raw/phased_genome_statistical_20220923172100_Muhammad_Elsadany_v5_Full_20220925180737.txt", 
+                  skip = 20, col.names = c("rsid","chromosome","position","allele1","allele2"))
+der <- raw %>%
+  mutate(genotype = paste0(allele1, allele2)) %>%
+  select(rsid, chromosome, position, genotype)
+write_delim(der, file = "../data/derivatives/my_23.tsv", delim = "\t",quote = "none", col_names = F)
+```
+
+
+Step2: 
+convert 23andme data to a VCF file
+
+```{bash convert 23andme data to a VCF file}
+conda activate tximpute
+cd /Dedicated/jmichaelson-wdata/msmuhammad/scratch/PGS/data/derivatives
+bcftools convert \
+            -c ID,CHROM,POS,AA \
+            --haploid2diploid \
+            --samples "you" \
+            -f /wdata/msmuhammad/data/genomics/ref_genome/hg_19_no_chr_header.fa \
+            --tsv2vcf my_23.tsv \
+            -Ov -o my_23.vcf
+```
+
+Step3:
+convert the vcf file to 1000G alleles
+
+```{r convert the vcf file to 1000G alleles}
+vcf.path <- "../data/derivatives/my_23.vcf"
+skip <- grep(x = read_lines(vcf.path), pattern = '^#CHROM')
+df <- read_table2(vcf.path, skip = skip - 1)
+
+bim <- read_rds('/Dedicated/jmichaelson-wdata/msmuhammad/data/genomics/1KG/1KG-eur-bim.rds') %>%
+  as.data.frame() %>%
+  `colnames<-`(c('#CHROM', 'rsid', 'idk', 'POS', 'minor', 'major'))  %>%
+  select(-c(3, rsid)) %>%
+  mutate(`#CHROM` = as.character(`#CHROM`))
+df2 <- left_join(bim, 
+                df %>% mutate(`#CHROM` = as.character(`#CHROM`))) %>%
+  filter(REF == major | REF == minor) %>%
+  mutate(major = case_when(is.na(major) == T ~ REF, TRUE ~ major),
+         minor = case_when(is.na(minor) == T ~ ALT, TRUE ~ minor),
+         true_geno = case_when(you == '0/0' ~ '0/0',
+                               you == '1/1' & ALT == major ~ '0/0',
+                               you == '1/1' & ALT == minor ~ '1/1',
+                               you == '0/1' & ALT == minor ~ '0/1', 
+                               you == '0/1' & ALT == major ~ '1/0',
+                               you == '1/0' & ALT == minor ~ '0/1',
+                               you == '1/0' & ALT == major ~ '1/0',
+                               TRUE ~ you)) %>%
+  drop_na(true_geno) %>%
+  select(-c(REF, ALT, you), 
+         REF = major,
+         ALT = minor,
+         you = true_geno) %>%
+  select(all_of(names(df)))
+
+(table(df2$you))
+write_tsv(df2, file = "../data/derivatives/my_23-ref-to-1KG.vcf")
+system("bgzip /Dedicated/jmichaelson-wdata/msmuhammad/scratch/PGS/data/derivatives/my_23-ref-to-1KG.vcf")
+```
+
+Step4:
+write the vcf file as plink
+
+```{bash write the vcf file as plink}
+tabix -p vcf /Dedicated/jmichaelson-wdata/msmuhammad/scratch/PGS/data/derivatives/my_23-ref-to-1KG.vcf.gz
+
+# convert the vcf to plink
+PLINK=/Dedicated/jmichaelson-wdata/msmuhammad/workbench/plink/plink
+OUT="/Dedicated/jmichaelson-wdata/msmuhammad/scratch/PGS/data/derivatives/my_23-ref-to-1KG.vcf"
+VCF="/Dedicated/jmichaelson-wdata/msmuhammad/scratch/PGS/data/derivatives/my_23-ref-to-1KG.vcf.gz"
+${PLINK} --vcf $VCF \
+        --keep-allele-order \
+        --geno 0 \
+        --chr 1-22 \
+        --id-delim \
+        --double-id \
+        --allow-extra-chr 0 \
+        --allow-no-sex \
+        --make-bed \
+        --out $OUT
+```
+
+Step5:
+merge your plink with 1KG
+
+```{r merge your plink with 1KG}
+# merge my plink file with 1KG bed
+bim.KG <- fread("/Dedicated/jmichaelson-sdata/1KG/phase3/EUR/ALL.chrs.pos.plink.bim")
+bim.you <- fread("/Dedicated/jmichaelson-wdata/msmuhammad/scratch/PGS/data/derivatives/my_23-ref-to-1KG.vcf.bim")
+hapmap3 <- read_rds("/Dedicated/jmichaelson-wdata/msmuhammad/data/genomics/rsid-ref-maps.rds") %>%
+  mutate(snp = paste0(chr, ':', pos))
+
+# filter 1KG bim file to keep hapmap3 snps
+bim.KG.hm3 <- bim.KG %>%
+  mutate(snp = paste0(V1, ':', V4)) %>%
+  dplyr::filter(snp %in% hapmap3$snp)
+rm(bim.KG);gc()
+# filter your bim file to keep hapmap3 snps
+bim.you.hm3 <- bim.you %>%
+  mutate(snp = paste0(V1, ':', V4))  %>%
+  filter(snp %in% hapmap3$snp)
+gc()
+
+bim.2.hm3 <- inner_join(bim.you.hm3, 
+                        bim.KG.hm3 %>% select(-c(V2, V3))) %>%
+  mutate(V2_2 = paste0(snp, ':', V6, ':', V5)) %>%
+  select(-V2) %>%
+  relocate(V2_2, .after = V1) %>%
+  rename(V2 = V2_2)
+
+# variants intersecting with hapmap3
+hm3.int <- intersect(str_remove_all(bim.2.hm3$V2, 'chr'), bim.KG.hm3$V2)
+
+# rewrite bim to only keep intersecting snps
+file.copy(from = "/Dedicated/jmichaelson-wdata/msmuhammad/scratch/PGS/data/derivatives/my_23-ref-to-1KG.vcf.bim",
+          to = "/Dedicated/jmichaelson-wdata/msmuhammad/scratch/PGS/data/derivatives/my_23-ref-to-1KG.vcf.bim.og")
+bim.you %>%
+  mutate(V2 = paste0(V1, ':', V4, ':', V6, ':', V5)) %>%
+  write_tsv("/Dedicated/jmichaelson-wdata/msmuhammad/scratch/PGS/data/derivatives/my_23-ref-to-1KG.vcf.bim", 
+            col_names = F)
+# save intersecting snp list
+snp.int.file <- "/Dedicated/jmichaelson-wdata/msmuhammad/scratch/PGS/data/derivatives/hm3_intersect.txt"
+write_tsv(hm3.int, 
+          file = snp.int.file,
+          col_names = F)
+
+# run plink to extract hm3 variants from your plink and 1KG plink
+bfile <- "/Dedicated/jmichaelson-wdata/msmuhammad/scratch/PGS/data/derivatives/my_23-ref-to-1KG.vcf"
+outf <- "/Dedicated/jmichaelson-wdata/msmuhammad/scratch/PGS/data/derivatives/my_23-ref-to-1KG.vcf.hm3"
+cmd <- paste0("/Dedicated/jmichaelson-wdata/msmuhammad/workbench/plink/plink",
+              " --bfile ", bfile, 
+              " --extract ", snp.int.file,
+              " --make-bed --out ", outf)
+system(cmd)
+bfile2 <- "/Dedicated/jmichaelson-sdata/1KG/phase3/EUR/ALL.chrs.pos.plink"
+outf2 <- "/Dedicated/jmichaelson-wdata/msmuhammad/scratch/PGS/data/derivatives/1000_genomes_eur.filt.hg19.normed.hm3"
+cmd2 <- paste0("/Dedicated/jmichaelson-wdata/msmuhammad/workbench/plink/plink --bfile ", 
+               bfile2, 
+               " --extract ", snp.int.file,
+               " --make-bed --out ", outf2)
+system(cmd2)
+
+# merge your plink with 1KG plink
+outf3 <- "/Dedicated/jmichaelson-wdata/msmuhammad/scratch/PGS/data/derivatives/my_23-merged-w-1KG.hm3"
+cmd3 <- paste0("/Dedicated/jmichaelson-wdata/msmuhammad/workbench/plink/plink",
+               " --bfile ", outf, 
+               " --bmerge ", bfile2,
+               " --make-bed --out ", outf3)
+system(cmd3)
+
+```
+
+Step6:
+calculate genetic PCs
+
+```{bash calculate genetic PCa}
+
+GCTA=/Dedicated/jmichaelson-wdata/msmuhammad/workbench/gcta/gcta-1.94.1
+PLINK=/Dedicated/jmichaelson-wdata/msmuhammad/workbench/plink/plink
+GENO=/Dedicated/jmichaelson-wdata/msmuhammad/scratch/PGS/data/derivatives/my_23-merged-w-1KG.hm3
+# paths for output files
+GRM=/Dedicated/jmichaelson-wdata/msmuhammad/scratch/PGS/data/derivatives/full_grm_hm3_snp
+SPGRM=/Dedicated/jmichaelson-wdata/msmuhammad/scratch/PGS/data/derivatives/sparse_grm.05
+GCTAPC=/Dedicated/jmichaelson-wdata/msmuhammad/scratch/PGS/data/derivatives/gcta_pc20_raw
+# make GRM
+$GCTA --bfile $GENO --make-grm --thread-num 6 --out $GRM
+# remove highly related people (twins)
+$GCTA --grm $GRM --grm-cutoff 0.125 --make-grm --thread-num 6 --out $GRM.cutoff
+# calculate genetic PC's from GRM ####
+$GCTA --grm $GRM.cutoff --pca 20 --thread-num 10 --out $GCTAPC
+```
+
+Step7:
+calculate PGS
+
+```{r calculate PGS}
+source("/Dedicated/jmichaelson-wdata/msmuhammad/workbench/customized-functions/calculate_ldpred_pgs.R")
+library(bigsnpr);set.seed(123);library(data.table);library(magrittr)
+options(bigstatsr.check.parallel.blas = FALSE)
+options(default.nproc.blas = NULL)
+info <- readRDS(runonce::download_file(
+  "https://figshare.com/ndownloader/files/37802721",
+  dir = "tmp-data", fname = "map_hm3_plus.rds"))
+###
+# loop over gwas sumstats
+gwas.sumstats.dir <- "/Dedicated/jmichaelson-wdata/msmuhammad/data/gwas-sumstats/ALL"
+sumstats.meta <- data.frame(phenotype = list.files(gwas.sumstats.dir, full.names = F))
+pgs.you <- foreach(i=1:nrow(sumstats.meta), .combine = rbind) %dopar% {
+  ###
+  # 3. Load and transform the summary statistic file
+  sumstats <- bigreadr::fread2(paste0(gwas.sumstats.dir, "/", sumstats.meta$phenotype[i])) 
+  # Filter out hapmap SNPs
+  sumstats.f <- sumstats[sumstats$rsid%in% info$rsid,] %>%
+    filter(a1 != a0)
+  rm(sumstats);gc()
+  ###
+  plink.rds.path <- "/Dedicated/jmichaelson-wdata/msmuhammad/scratch/PGS/data/derivatives/my_23-merged-w-1KG.hm3.rds"
+  pgs <- calculate_ldpred_pgs(sumstats = sumstats.f,
+                              plink_rds = plink.rds.path,
+                              sd_y = 0,
+                              pheno_name = sumstats.meta$phenotype[i],
+                              n_core = 8,
+                              build = 'hg19')
+  gc()
+  return(pgs)
+}
+write_rds(pgs.you, "/Dedicated/jmichaelson-wdata/msmuhammad/scratch/PGS/data/derivatives/your-raw-pgs.rds")
+
+###
+
+```
+
