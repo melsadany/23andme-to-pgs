@@ -1,18 +1,19 @@
 #!/bin/bash
 #$ -S /bin/bash
-#$ -pe smp 80
-#$ -q JM,UI
+#$ -pe smp 11
+#$ -q JM,UI,CCOM
 #$ -cwd
 #$ -j y
 #$ -ckpt user
 #$ -o logs/$JOB_NAME.$TASK_ID.log 
 #$ -ckpt user
 #$ -N PRS-calc
+#$ -t 1-38
 
 conda activate tximpute2
 
 PROJECT_DIR=/Dedicated/jmichaelson-wdata/msmuhammad/scratch/PGS
 cd $PROJECT_DIR
 
-Rscript $PROJECT_DIR/src/01_PRS-calc.R
+Rscript $PROJECT_DIR/src/01_PRS-calc.R $((${SGE_TASK_ID}))
 

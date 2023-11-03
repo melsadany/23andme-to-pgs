@@ -219,15 +219,37 @@ pgs.you <- foreach(i=1:nrow(sumstats.meta), .combine = rbind) %dopar% {
   pgs <- calculate_ldpred_pgs(sumstats = sumstats.f,
                               plink_rds = plink.rds.path,
                               sd_y = 0,
-                              pheno_name = sumstats.meta$phenotype[i],
-                              n_core = 8,
+                              pheno_name = sub(".txt", "", sumstats.meta$phenotype[i]),
+                              n_core = 10,
                               build = 'hg19')
   gc()
-  return(pgs)
+  print(paste0("Done for: ", sub(".txt", "", sumstats.meta$phenotype[i])))
+  system("mkdir -p /Dedicated/jmichaelson-wdata/msmuhammad/scratch/PGS/data/derivatives/pgs")
+  write_rds(pgs, paste0("/Dedicated/jmichaelson-wdata/msmuhammad/scratch/PGS/data/derivatives/pgs/",
+                        sub(".txt", "", sumstats.meta$phenotype[i]), ".rds"))
+  # return(pgs)
 }
-write_rds(pgs.you, "/Dedicated/jmichaelson-wdata/msmuhammad/scratch/PGS/data/derivatives/your-raw-pgs.rds")
+# write_rds(pgs.you, "/Dedicated/jmichaelson-wdata/msmuhammad/scratch/PGS/data/derivatives/your-raw-pgs.rds")
 
 ###
+# combine PGS and correct them for genetics PCs
+pgs.dir <- "/Dedicated/jmichaelson-wdata/msmuhammad/scratch/PGS/data/derivatives/pgs"
+pgs.ls <- data.frame(f = list.files(pgs.dir)) %>%
+  mutate(PGS = sub(".rds", "", f)) %>%
+  mutate(PGS = sub(".txt", "", PGS)) 
+pcs <- read_table("/Dedicated/jmichaelson-wdata/msmuhammad/scratch/PGS/data/derivatives/gcta_pc20_raw.eigenvec", 
+                  col_names = c("IID", "FID", paste0("PC", 1:20)))
+registerDoMC(cores = 4)
+pgs.all <- foreach(i=1:nrow(pgs.ls), .combine = rbind) %dopar% {
+  raw <- read_rds(paste0(pgs.dir, "/", pgs.ls$f[i])) %>%
+    mutate(pgs_name = sub(".txt", "", pgs_name))
+  corrected <- inner_join(raw, pcs) %>%
+    mutate(corrected_pgs = residuals(glm(as.formula(paste0("PGS ~ ", paste(paste0("PC", c(1:20)), collapse = " + "))), 
+                                         data = inner_join(raw, pcs)))) %>%
+    select(IID, PGS, corrected_pgs, pgs_name)
+  return(corrected)
+}
+write_rds(pgs.all, "/Dedicated/jmichaelson-wdata/msmuhammad/scratch/PGS/data/derivatives/all-pgs.rds")
 
 ```
 
