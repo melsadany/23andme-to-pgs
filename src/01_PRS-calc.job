@@ -1,6 +1,6 @@
 #!/bin/bash
 #$ -S /bin/bash
-#$ -pe smp 11
+#$ -pe smp 7
 #$ -q JM,UI,CCOM
 #$ -cwd
 #$ -j y
@@ -8,7 +8,7 @@
 #$ -o logs/$JOB_NAME.$TASK_ID.log 
 #$ -ckpt user
 #$ -N PRS-calc
-#$ -t 1-38
+#$ -t 1-55
 
 conda activate tximpute2
 
